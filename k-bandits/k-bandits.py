@@ -1,181 +1,110 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+K = 3                       
+TRUE_MEANS = [5, 6, 7]      
+SD = 2                      
+STEPS = 1000                
+RUNS = 500                  
+EPSILON = 0.1               
+ALPHA = 0.1                 
+WALK_SD = 0.5               
+WALK_EVERY = 10             
 
-class Environment:
-    def __init__(self, n_states=5, n_actions=10, seed=42, drift_std=0.0):
-        self.n_states = n_states
-        self.n_actions = n_actions
-        self.drift_std = drift_std
-        self.rng = np.random.default_rng(seed)
-        self._initial_rewards = self.rng.normal(0, 1, (n_states, n_actions))
-        self.true_rewards = self._initial_rewards.copy()
-
-    def reset(self):
-        self.true_rewards = self._initial_rewards.copy()
-
-    def sample_state(self):
-        return int(self.rng.integers(0, self.n_states))
-
-    def step(self, state, action):
-        reward = self.rng.normal(self.true_rewards[state, action], 1)
-        if self.drift_std > 0.0:
-            self.true_rewards += self.rng.normal(0, self.drift_std, self.true_rewards.shape)
-        return reward
-
-    def optimal_action(self, state):
-        return int(np.argmax(self.true_rewards[state]))
+means = np.array(TRUE_MEANS, dtype=float)
+Q = np.zeros(K)
+counts = np.zeros(K)
 
 
-class Agent:
-    """
-    Strategies:
-      greedy    — always pick best estimated action per state
-      egreedy   — pick random action with probability epsilon, else greedy
-      optimistic — greedy on optimistic initial Q values (forces early exploration)
+def greedy():
+    action = np.argmax(Q)
 
-    Update rule (all strategies):
-      alpha=None  → sample average: step size = 1/N  (equal weight to all past rewards)
-      alpha=float → constant step:  step size = alpha (recent rewards weighted more)
-    """
+    reward = np.random.normal(loc=means[action], scale=SD)
 
-    def __init__(self, n_states, n_actions, strategy="greedy", epsilon=0.1,
-                 alpha=None, optimistic_init=5.0):
-        self.n_states = n_states
-        self.n_actions = n_actions
-        self.strategy = strategy
-        self.epsilon = epsilon
-        self.alpha = alpha
-        self.optimistic_init = optimistic_init
-        self.reset()
+    counts[action] += 1
+    Q[action] += (1 / counts[action]) * (reward - Q[action])
 
-    def reset(self):
-        if self.strategy == "optimistic":
-            self.Q = np.full((self.n_states, self.n_actions), self.optimistic_init, dtype=float)
-        else:
-            self.Q = np.zeros((self.n_states, self.n_actions), dtype=float)
-        self.N = np.zeros((self.n_states, self.n_actions), dtype=int)
-
-    def select_action(self, state):
-        if self.strategy in ("greedy", "optimistic"):
-            return int(np.argmax(self.Q[state]))
-
-        if self.strategy == "egreedy":
-            if np.random.random() < self.epsilon:
-                return np.random.randint(self.n_actions)
-            return int(np.argmax(self.Q[state]))
-
-        return np.random.randint(self.n_actions)
-
-    def update(self, state, action, reward):
-        self.N[state, action] += 1
-        step = self.alpha if self.alpha is not None else 1.0 / self.N[state, action]
-        self.Q[state, action] += step * (reward - self.Q[state, action])
+    return action, reward
 
 
-def run_experiment(env, agent, n_steps=1000, n_runs=200):
-    rewards_log = np.zeros((n_runs, n_steps))
-    optimal_log = np.zeros((n_runs, n_steps))
+def e_greedy(explore_chance):
+    if np.random.random() <= explore_chance:
+        action = np.random.randint(K)
+    else:
+        action = np.argmax(Q)
 
-    for run in range(n_runs):
-        env.reset()
-        agent.reset()
-        for t in range(n_steps):
-            state = env.sample_state()
-            action = agent.select_action(state)
-            reward = env.step(state, action)
-            agent.update(state, action, reward)
-            rewards_log[run, t] = reward
-            optimal_log[run, t] = int(action == env.optimal_action(state))
+    reward = np.random.normal(loc=means[action], scale=SD)
 
-    return rewards_log, optimal_log
+    counts[action] += 1
+    Q[action] += (1 / counts[action]) * (reward - Q[action])
+
+    return action, reward
 
 
-def plot_results(results, n_steps, title_suffix="", filename="strategy_comparison.png"):
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(f"Multi-Armed Bandit: Strategy Comparison{title_suffix}", fontsize=14)
+def const_step(explore_chance, alpha):
+    if np.random.random() <= explore_chance:
+        action = np.random.randint(K)
+    else:
+        action = np.argmax(Q)
 
-    for label, (rewards, optimal) in results.items():
-        axes[0].plot(rewards.mean(axis=0), label=label)
-        axes[1].plot(optimal.mean(axis=0) * 100, label=label)
+    reward = np.random.normal(loc=means[action], scale=SD)
 
-    axes[0].set_title("Average Reward over Time")
-    axes[0].set_xlabel("Step")
-    axes[0].set_ylabel("Average Reward")
-    axes[0].legend()
+    counts[action] += 1
+    Q[action] += alpha * (reward - Q[action])
 
-    axes[1].set_title("% Optimal Action over Time")
-    axes[1].set_xlabel("Step")
-    axes[1].set_ylabel("% Optimal Action")
-    axes[1].legend()
-
-    plt.tight_layout()
-    plt.savefig(filename, dpi=120)
-    plt.show()
+    return action, reward
 
 
-def plot_reward_distributions(results, title_suffix="", filename="reward_distributions.png"):
-    fig, axes = plt.subplots(1, len(results), figsize=(5 * len(results), 4), sharey=True)
-    fig.suptitle(f"Final-Step Reward Distributions per Strategy{title_suffix}", fontsize=13)
+def run_policy(step_fn, init_q, non_stationary, steps=STEPS):
+    """step_fn() is a no-arg call doing one pull, returning (action, reward)."""
+    global means, Q, counts
+    total = np.zeros(steps)
 
-    for ax, (label, (rewards, _)) in zip(axes, results.items()):
-        final_rewards = rewards[:, -1]
-        ax.hist(final_rewards, bins=30, color="steelblue", edgecolor="white", alpha=0.85)
-        ax.axvline(final_rewards.mean(), color="red", linestyle="--",
-                   label=f"mean={final_rewards.mean():.2f}")
-        ax.set_title(label)
-        ax.set_xlabel("Reward")
-        ax.legend(fontsize=8)
+    for _ in range(RUNS):
+        means = np.array(TRUE_MEANS, dtype=float)
+        Q = np.full(K, float(init_q))
+        counts = np.zeros(K)
 
-    axes[0].set_ylabel("Frequency")
-    plt.tight_layout()
-    plt.savefig(filename, dpi=120)
-    plt.show()
+        for t in range(steps):
+            if non_stationary and t > 0 and t % WALK_EVERY == 0:
+                means += np.random.normal(0.0, WALK_SD, size=K)
 
+            _, reward = step_fn()
+            total[t] += reward
 
-def make_strategies(n_states, n_actions):
-    return {
-        "Greedy":                    Agent(n_states, n_actions, strategy="greedy"),
-        "E-Greedy (e=0.1)":          Agent(n_states, n_actions, strategy="egreedy", epsilon=0.1),
-        "Const. Step (a=0.1)":       Agent(n_states, n_actions, strategy="egreedy", epsilon=0.1, alpha=0.1),
-        "Optimistic Init (Q0=5)":    Agent(n_states, n_actions, strategy="optimistic", optimistic_init=5.0),
-    }
+    return total / RUNS
 
 
-def run_scenario(label, drift_std, n_steps, n_runs, n_states, n_actions,
-                 plot_suffix, cmp_file, dist_file):
-    print(f"\n=== {label} (states={n_states}, actions={n_actions}, drift_std={drift_std}) ===")
-    env = Environment(n_states=n_states, n_actions=n_actions, seed=0, drift_std=drift_std)
-    strategies = make_strategies(n_states, n_actions)
-    results = {}
-    for name, agent in strategies.items():
-        print(f"  Running: {name} ...")
-        results[name] = run_experiment(env, agent, n_steps=n_steps, n_runs=n_runs)
-    plot_results(results, n_steps, title_suffix=plot_suffix, filename=cmp_file)
-    plot_reward_distributions(results, title_suffix=plot_suffix, filename=dist_file)
-    print(f"  Saved: {cmp_file}, {dist_file}")
+POLICIES = [
+    ("Greedy (sample-avg)", greedy),
+    ("Epsilon-greedy (sample-avg)", lambda: e_greedy(EPSILON)),
+    ("Const step size", lambda: const_step(EPSILON, ALPHA)),
+]
 
 
-if __name__ == "__main__":
-    N_STEPS = 1000
-    N_RUNS = 500
-    N_STATES = 5
-    N_ACTIONS = 10
+def make_graph(ax, title, init_q, non_stationary, steps=STEPS):
+    for label, step_fn in POLICIES:
+        avg = run_policy(step_fn, init_q, non_stationary, steps)
+        ax.plot(avg, label=label)
+    ax.axhline(max(TRUE_MEANS), color="gray", ls="--", lw=1, label="best mean")
+    ax.set_title(title)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Average reward")
+    ax.legend(fontsize=8)
 
-    run_scenario(
-        label="Static Distribution",
-        drift_std=0.0,
-        n_steps=N_STEPS, n_runs=N_RUNS, n_states=N_STATES, n_actions=N_ACTIONS,
-        plot_suffix=" — Static",
-        cmp_file="strategy_comparison_static.png",
-        dist_file="reward_distributions_static.png",
-    )
 
-    run_scenario(
-        label="Fast Changing Distribution",
-        drift_std=0.05,
-        n_steps=N_STEPS, n_runs=N_RUNS, n_states=N_STATES, n_actions=N_ACTIONS,
-        plot_suffix=" — Non-Stationary (drift=0.05)",
-        cmp_file="strategy_comparison_nonstationary_fast.png",
-        dist_file="reward_distributions_nonstationary_fast.png",
-    )
+SHORT_STEPS = 50
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+make_graph(axes[0, 0], "Stationary, Q init = 0",       init_q=0, non_stationary=False)
+make_graph(axes[0, 1], "Stationary, optimistic Q = 5", init_q=5, non_stationary=False)
+make_graph(axes[1, 0], f"Non-stationary (means drift every {WALK_EVERY} steps), Q init = 0",
+           init_q=0, non_stationary=True)
+make_graph(axes[1, 1], f"Stationary, Q init = 0, only {SHORT_STEPS} steps",
+           init_q=0, non_stationary=False, steps=SHORT_STEPS)
+
+plt.tight_layout()
+plt.savefig("bandit_comparison.png", dpi=120)
+print("Saved bandit_comparison.png")
+plt.show()
